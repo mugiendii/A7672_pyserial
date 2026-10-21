@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the local relay and the A7672 TLS test together; sends one command when the device starts listening.
-#   MQTT_DEVICE_ID=oceo2 MQTT_DEVICE_OCEO2_PASSWORD=... MQTT_RELAY_DESKTOP_PASSWORD=... ./run_tls_test.sh
+# The modem uses the login stored by provision_device.py; MQTT_DEVICE_ID only picks what the relay watches.
+#   MQTT_DEVICE_ID=oceo2 MQTT_RELAY_DESKTOP_PASSWORD=... ./run_tls_test.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 PY=.venv/bin/python

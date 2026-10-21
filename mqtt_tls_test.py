@@ -1,6 +1,8 @@
 """Production MQTT (TLS, port 8883) test for the A7672, following the Nodewave broker guide.
 
-Run as the device, with its password from Infisical (project Nodewave, env prod, folder /mqtt):
+Uses the login stored on the modem by provision_device.py (C:/mqtt.json), like the device firmware does:
+    .venv/bin/python mqtt_tls_test.py
+Override for a modem that is not provisioned:
     MQTT_DEVICE_ID=oceo2 MQTT_DEVICE_OCEO2_PASSWORD=... .venv/bin/python mqtt_tls_test.py
 """
 import os
@@ -23,19 +25,14 @@ APN_NAME = "safaricom"
 # --- PRODUCTION MQTT (TLS) CONFIGURATION ---
 MQTT_HOST = "mqtt.nodewave.dev"   # Always the hostname, never the IP
 MQTT_PORT = 8883
-MQTT_BROKER_URI = f"tcp://{MQTT_HOST}:{MQTT_PORT}"
 KEEPALIVE = 60
 
-# Device id = username = client id = topic prefix
-DEVICE_ID = os.environ.get("MQTT_DEVICE_ID", "")
-# Defaults to the device id; override (e.g. "oceo2-test") to avoid kicking off a live device with the same id
-MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", DEVICE_ID)
-MQTT_PASSWORD = os.environ.get(f"MQTT_DEVICE_{DEVICE_ID.upper().replace('-', '_')}_PASSWORD", "")
+# Broker settings + login stored on the modem's flash; same shape as a {"type":"mqtt"} <id>/down/cfg message
+DEVICE_CONFIG_PATH = "C:/mqtt.json"
 
-TOPIC_STATUS = f"{DEVICE_ID}/status"
-TOPIC_POINTS = f"{DEVICE_ID}/points"
-TOPIC_CMD = f"{DEVICE_ID}/cmd"
-TOPIC_CFG = f"{DEVICE_ID}/cfg"
+# Set by set_device(): device id = username = client id = topic prefix
+DEVICE_ID = MQTT_CLIENT_ID = MQTT_PASSWORD = MQTT_BROKER_URI = ""
+TOPIC_STATUS = TOPIC_POINTS = TOPIC_DOWN = TOPIC_CMD = TOPIC_CFG = ""
 
 # --- TLS CONFIGURATION ---
 SSL_CTX = 0
@@ -48,6 +45,37 @@ BACKOFF_MAX = 60
 
 TEST_POINTS = 3
 LISTEN_SECONDS = 60
+
+
+def set_device(cfg, client_id=None):
+    """Use the broker settings and login in cfg ({"host","port","username","password"})."""
+    global DEVICE_ID, MQTT_CLIENT_ID, MQTT_PASSWORD, MQTT_BROKER_URI
+    global TOPIC_STATUS, TOPIC_POINTS, TOPIC_DOWN, TOPIC_CMD, TOPIC_CFG
+    DEVICE_ID = cfg["username"]
+    MQTT_CLIENT_ID = client_id or DEVICE_ID
+    MQTT_PASSWORD = cfg["password"]
+    MQTT_BROKER_URI = f"tcp://{cfg.get('host', MQTT_HOST)}:{cfg.get('port', MQTT_PORT)}"
+    # Device publishes under <id>/up/, reads <id>/down/ (anything else is silently dropped by the broker)
+    TOPIC_STATUS = f"{DEVICE_ID}/up/status"
+    TOPIC_POINTS = f"{DEVICE_ID}/up/points"
+    TOPIC_DOWN = f"{DEVICE_ID}/down/#"
+    TOPIC_CMD = f"{DEVICE_ID}/down/cmd"
+    TOPIC_CFG = f"{DEVICE_ID}/down/cfg"
+
+
+def read_device_config(ser):
+    """Read DEVICE_CONFIG_PATH from the modem. Returns the dict or None. Never prints the password."""
+    ser.reset_input_buffer()
+    ser.write(f'AT+CFTRANTX="{DEVICE_CONFIG_PATH}"\r\n'.encode())
+    resp = wait_for_urc(ser, "+CFTRANTX: 0", timeout=5)
+    m = re.search(r'\+CFTRANTX: DATA, ?(\d+)\r\n', resp or "")
+    if not m:
+        return None
+    try:
+        return json.loads(resp[m.end():m.end() + int(m.group(1))])
+    except ValueError:
+        print(f"{DEVICE_CONFIG_PATH} on the modem is not valid JSON")
+        return None
 
 
 def bring_up_network(ser):
@@ -156,7 +184,7 @@ def connect_once(ser):
     send_at(ser, 'AT+CMQTTCFG="version",0,4')   # MQTT 3.1.1
     send_at(ser, 'AT+CMQTTCFG="optimeout",0,60')
 
-    # Last will: <id>/status = offline, QoS 1.
+    # Last will: <id>/up/status = offline, QoS 1.
     # AT+CMQTTWILLMSG has no retain flag on this firmware, so the will is not retained.
     if not send_with_prompt(ser, f'AT+CMQTTWILLTOPIC=0,{len(TOPIC_STATUS)}', TOPIC_STATUS):
         return None
@@ -164,8 +192,13 @@ def connect_once(ser):
         return None
 
     # Clean session = 1
-    resp = send_at(ser, f'AT+CMQTTCONNECT=0,"{MQTT_BROKER_URI}",{KEEPALIVE},1,"{DEVICE_ID}","{MQTT_PASSWORD}"',
-                   wait_time=3)
+    # Written directly so the password is not printed
+    print(f'Sending: AT+CMQTTCONNECT=0,"{MQTT_BROKER_URI}",{KEEPALIVE},1,"{DEVICE_ID}","********"')
+    ser.write(f'AT+CMQTTCONNECT=0,"{MQTT_BROKER_URI}",{KEEPALIVE},1,"{DEVICE_ID}","{MQTT_PASSWORD}"\r\n'.encode())
+    resp = wait_for_urc(ser, "OK", timeout=5) or ""
+    if "ERROR" in resp:
+        print("MQTT connect command failed")
+        return None
     m = re.search(r'\+CMQTTCONNECT: 0,(\d+)', resp)
     if not m:
         # TLS handshake takes longer than plain TCP
@@ -197,9 +230,9 @@ def connect_with_backoff(ser):
 
 
 def subscribe(ser, topic):
-    urc = send_with_prompt(ser, f'AT+CMQTTSUB=0,{len(topic)},1', topic)
-    if urc is None:
+    if send_with_prompt(ser, f'AT+CMQTTSUBTOPIC=0,{len(topic)},1', topic) is None:
         return False
+    urc = send_at(ser, "AT+CMQTTSUB=0")
     if "+CMQTTSUB:" not in urc:
         urc = wait_for_urc(ser, "+CMQTTSUB:", timeout=10)
     if urc and "+CMQTTSUB: 0,0" in urc:
@@ -226,20 +259,36 @@ def publish(ser, topic, payload, qos=1, retained=0):
     return False
 
 
+def parse_rx(block):
+    """Rebuild (topic, payload) from one +CMQTTRXSTART ... +CMQTTRXEND block (parts may be split)."""
+    def collect(prefix):
+        out = ""
+        for m in re.finditer(rf'\+{prefix}: 0,(\d+)\r\n', block):
+            out += block[m.end():m.end() + int(m.group(1))]
+        return out
+    return collect("CMQTTRXTOPIC"), collect("CMQTTRXPAYLOAD")
+
+
 def listen(ser, seconds):
-    print(f"Listening on {TOPIC_CMD} and {TOPIC_CFG} for {seconds}s "
-          f"(send one with an app login, e.g. relay-desktop)...")
+    print(f"Listening on {TOPIC_DOWN} for {seconds}s (send one with an app login, e.g. relay-desktop)...")
     end = time.time() + seconds
     buf = ""
     received = 0
     while time.time() < end:
         if ser.in_waiting > 0:
             buf += ser.read(ser.in_waiting).decode(errors='ignore')
-            if "+CMQTTRXEND:" in buf:
-                print(f"Received:\n{buf.strip()}")
-                received += buf.count("+CMQTTRXEND:")
-                buf = ""
-            elif "+CMQTTCONNLOST:" in buf:
+            while "+CMQTTRXEND:" in buf:
+                block, _, buf = buf.partition("+CMQTTRXEND:")
+                buf = buf.split("\n", 1)[1] if "\n" in buf else ""
+                topic, payload = parse_rx(block)
+                received += 1
+                if topic == TOPIC_CMD:
+                    print(f"Command received: {payload}")
+                elif topic == TOPIC_CFG:
+                    print(f"Config received: {payload}")
+                else:
+                    print(f"Ignoring unknown topic {topic}: {payload}")
+            if "+CMQTTCONNLOST:" in buf:
                 print(f"Connection lost:\n{buf.strip()}")
                 break
         time.sleep(0.1)
@@ -247,11 +296,23 @@ def listen(ser, seconds):
 
 
 def main():
-    if not DEVICE_ID or not MQTT_PASSWORD:
-        print("Set MQTT_DEVICE_ID and MQTT_DEVICE_<ID>_PASSWORD (from Infisical, project Nodewave, prod, /mqtt).")
-        sys.exit(1)
-
     ser = serial.Serial(PORT, BAUD, timeout=1)
+
+    device_id = os.environ.get("MQTT_DEVICE_ID")
+    password = device_id and os.environ.get(f"MQTT_DEVICE_{device_id.upper().replace('-', '_')}_PASSWORD")
+    if device_id and password:
+        cfg = {"username": device_id, "password": password}
+    else:
+        cfg = read_device_config(ser)
+        if not cfg:
+            print(f"Modem has no {DEVICE_CONFIG_PATH}: run provision_device.py first, "
+                  f"or set MQTT_DEVICE_ID and MQTT_DEVICE_<ID>_PASSWORD.")
+            ser.close()
+            sys.exit(1)
+        print(f"Using login for {cfg['username']} from the modem ({DEVICE_CONFIG_PATH})")
+    # Override (e.g. "oceo2-test") to avoid kicking off a live device with the same id
+    set_device(cfg, os.environ.get("MQTT_CLIENT_ID"))
+
     results = {}
     connected = False
     try:
@@ -269,8 +330,7 @@ def main():
             return
 
         results["status_online"] = publish(ser, TOPIC_STATUS, "online", qos=1, retained=1)
-        results["sub_cmd"] = subscribe(ser, TOPIC_CMD)
-        results["sub_cfg"] = subscribe(ser, TOPIC_CFG)
+        results["sub_down"] = subscribe(ser, TOPIC_DOWN)
 
         sent = 0
         for i in range(TEST_POINTS):
