@@ -4,3 +4,5 @@ __pycache__/
 devices.csv
 devices.json
 mqtt_relay_log.jsonl
+# app keys (commission.py fetches them on the first run)
+nodewave.env

@@ -1,13 +1,20 @@
-"""Production MQTT (TLS, port 8883) test for the A7672, following the Nodewave broker guide.
+"""Production MQTT (TLS, port 8883) for the A7672, following the Nodewave broker guide.
 
-Uses the login stored on the modem by provision_device.py (C:/mqtt.json), like the device firmware does:
-    .venv/bin/python mqtt_tls_test.py
-Override for a modem that is not provisioned:
-    MQTT_DEVICE_ID=oceo2 MQTT_DEVICE_OCEO2_PASSWORD=... .venv/bin/python mqtt_tls_test.py
+    python3 mqtt_tls_test.py          device commissioning: install page, login onto the module,
+                                      dummy data, relay view (commission.py)
+    python3 mqtt_tls_test.py --test   the short TLS test: 3 points with the login on the modem
+Override the login for --test on a modem that is not provisioned:
+    MQTT_DEVICE_ID=oceo2 MQTT_DEVICE_OCEO2_PASSWORD=... python3 mqtt_tls_test.py --test
 """
 import os
 import re
 import sys
+
+# Run inside the project's .venv (pyserial, paho-mqtt) even when started with plain python3
+_VENV = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
+if __name__ == "__main__" and os.path.exists(os.path.join(_VENV, "bin", "python")) \
+        and os.path.realpath(sys.prefix) != os.path.realpath(_VENV):
+    os.execv(os.path.join(_VENV, "bin", "python"), [os.path.join(_VENV, "bin", "python"), *sys.argv])
 import time
 import datetime
 import json
@@ -317,7 +324,7 @@ def listen(ser, seconds):
     return received
 
 
-def main():
+def tls_test():
     ser = serial.Serial(PORT, BAUD, timeout=1)
 
     device_id = os.environ.get("MQTT_DEVICE_ID")
@@ -381,4 +388,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--test" in sys.argv:
+        tls_test()
+    else:
+        # Through the module, not __main__, so every script shares one copy of the device settings
+        import commission
+        commission.run()
