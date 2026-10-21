@@ -9,7 +9,8 @@
 4. The page also shows the readings arriving on the relay side (login relay-desktop).
 
 The app's own keys (MQTT_PROVISION_API_KEY, MQTT_RELAY_DESKTOP_PASSWORD) are set up on the first
-run: fetched from the server over SSH into ~/.config/nodewave.env. The installer never handles them.
+run by pairing: enter the one-time code from the server team (or python3 mqtt_tls_test.py --pair CODE);
+the app trades it for the keys and keeps them in ~/.config/nodewave.env. The installer never sees them.
 """
 import datetime
 import html
@@ -18,13 +19,15 @@ import os
 import queue
 import re
 import ssl
-import subprocess
+import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-SERVER = "root@157.173.107.18"
+PROVISION_API = os.environ.get("MQTT_PROVISION_API_URL", "https://mqtt-api.nodewave.dev").rstrip("/")
 KEYS = ("MQTT_PROVISION_API_KEY", "MQTT_RELAY_DESKTOP_PASSWORD")
 KEY_FILES = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodewave.env"),
              os.path.expanduser("~/.config/nodewave.env"))
@@ -36,30 +39,39 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
 # ---- App keys ---------------------------------------------------------------
 
 def load_keys():
-    """Put the app's keys in os.environ: from a key file, else fetched from the server once."""
+    """Put the app's keys in os.environ: from a key file, else by pairing once with a code."""
     for path in KEY_FILES:
         if os.path.exists(path):
             _read_env(path)
             if all(os.environ.get(k) for k in KEYS):
                 return True
-    print(f"First run: fetching the app keys from {SERVER} over SSH...")
+    code = sys.argv[sys.argv.index("--pair") + 1] if "--pair" in sys.argv[:-1] else ""
+    if not code:
+        print("This app is not paired yet. Ask the server team for a pairing code (valid 15 min).")
+        try:
+            code = input("Pairing code: ").strip()
+        except EOFError:
+            code = ""
+    if not code:
+        return False
+    req = urllib.request.Request(PROVISION_API + "/v1/pair", method="POST",
+                                 data=json.dumps({"code": code}).encode(),
+                                 headers={"Content-Type": "application/json"})
     try:
-        out = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", SERVER,
-             "/root/mqtt/provision/export-env.sh", *KEYS],
-            capture_output=True, text=True, timeout=30)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        out = None
-    if not out or out.returncode != 0 or not all(k + "=" in out.stdout for k in KEYS):
-        print("Could not fetch the app keys over SSH (no SSH access to the server from here?).\n"
-              f"Put {', '.join(KEYS)} in {KEY_FILES[1]} (NAME=value lines) and run again.")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            keys = json.load(resp)
+    except urllib.error.HTTPError as e:
+        print(f"Pairing refused: {json.load(e).get('error', e.reason)}. Ask for a new code.")
+        return False
+    except OSError as e:
+        print(f"Could not reach {PROVISION_API}: {e}")
         return False
     path = KEY_FILES[1]
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(out.stdout)
-    print(f"App keys saved in {path} (readable only by you)")
+        f.writelines(f"{k}={keys[k]}\n" for k in KEYS)
+    print(f"Paired. App keys saved in {path} (readable only by you)")
     _read_env(path)
     return True
 
