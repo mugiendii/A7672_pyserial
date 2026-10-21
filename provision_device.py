@@ -4,10 +4,10 @@ The device keeps its login in the modem's flash (C:/mqtt.json) next to the CA ce
 needs the password again after this. Run once per device, with the modem on /dev/ttyUSB0:
     .venv/bin/python provision_device.py oceo2
 
-The password comes from Infisical (Nodewave / prod / /mqtt, key MQTT_DEVICE_<ID>_PASSWORD) through the
-Infisical CLI, logged in once on this bench machine (e.g. a machine identity: export INFISICAL_TOKEN=...).
-Or set MQTT_DEVICE_<ID>_PASSWORD in the environment. The login itself is created by the server team
-(./add-device.sh <id>) - ask them for a batch of ids ahead of time.
+The login comes from the provisioning API (https://mqtt-api.nodewave.dev, broker repo PROVISIONING.md):
+this script asks it to create the device (or give an existing one a new password) and writes the
+answer straight onto the modem. Nobody sees or copies the password. Needs the app's API key once:
+    MQTT_PROVISION_API_KEY=... .venv/bin/python provision_device.py dev01
 """
 import argparse
 import csv
@@ -15,8 +15,9 @@ import datetime
 import json
 import os
 import re
-import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 import serial
 
@@ -24,34 +25,40 @@ import mqtt_tls_test as dev
 from setup import send_at, reset_mqtt
 
 REGISTRY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "devices.csv")
-INFISICAL_ENV = "prod"
-INFISICAL_PATH = "/mqtt"
+PROVISION_API = os.environ.get("MQTT_PROVISION_API_URL", "https://mqtt-api.nodewave.dev").rstrip("/")
+PROVISION_API_KEY = os.environ.get("MQTT_PROVISION_API_KEY", "")
 
 
-def password_key(device_id):
-    return f"MQTT_DEVICE_{device_id.upper().replace('-', '_')}_PASSWORD"
-
-
-def get_password(device_id):
-    """Password from the environment, else from Infisical. Never printed."""
-    key = password_key(device_id)
-    if os.environ.get(key):
-        return os.environ[key]
-    cmd = ["infisical", "secrets", "get", key, f"--env={INFISICAL_ENV}", f"--path={INFISICAL_PATH}",
-           "--plain", "--silent"]
-    if os.environ.get("INFISICAL_PROJECT_ID"):
-        cmd.append(f"--projectId={os.environ['INFISICAL_PROJECT_ID']}")
+def api(method, path, body=None):
+    """Call the provisioning API. Returns (status, json body)."""
+    req = urllib.request.Request(
+        PROVISION_API + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {PROVISION_API_KEY}", "Content-Type": "application/json"})
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        print(f"Infisical CLI not installed. Install it and log in, or set {key}.")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status, json.load(resp)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.load(e)
+        except ValueError:
+            return e.code, {"error": e.reason}
+
+
+def get_login(device_id):
+    """Create the device on the broker, or give an existing one a new password. Never printed."""
+    if not PROVISION_API_KEY:
+        print("Set MQTT_PROVISION_API_KEY (the app's key for the provisioning API).")
         return None
-    password = out.stdout.strip()
-    if out.returncode != 0 or not password:
-        print(f"{key} not found in Infisical ({INFISICAL_ENV} {INFISICAL_PATH}). "
-              f"Ask the server team to run ./add-device.sh {device_id}.")
+    status, body = api("POST", "/v1/devices", {"id": device_id})
+    if status == 409:
+        print(f"{device_id} already exists on the broker: giving it a new password")
+        status, body = api("POST", f"/v1/devices/{device_id}/rotate")
+    if status not in (200, 201):
+        print(f"Provisioning API refused ({status}): {body.get('error')}")
         return None
-    return password
+    return {"type": "mqtt", "host": body["broker"]["host"], "port": body["broker"]["port"],
+            "username": body["username"], "password": body["password"]}
 
 
 def write_device_config(ser, cfg):
@@ -102,19 +109,20 @@ def main():
     if not re.fullmatch(r"[a-z0-9-]+", args.device_id):
         parser.error("device id: lowercase letters, digits and - only")
 
-    password = get_password(args.device_id)
-    if not password:
-        sys.exit(1)
-    cfg = {"type": "mqtt", "host": dev.MQTT_HOST, "port": dev.MQTT_PORT,
-           "username": args.device_id, "password": password}
-
+    # Check the modem first: a new password is only worth making if it can be stored
     ser = serial.Serial(dev.PORT, dev.BAUD, timeout=1)
+    if "OK" not in send_at(ser, "AT"):
+        print("Module not responding. Check serial connection and power.")
+        ser.close()
+        sys.exit(1)
+    cfg = get_login(args.device_id)
+    if not cfg:
+        ser.close()
+        sys.exit(1)
+
     result = "failed"
     imei = ""
     try:
-        if "OK" not in send_at(ser, "AT"):
-            print("Module not responding. Check serial connection and power.")
-            return
         send_at(ser, "ATE0")
         imei = read_imei(ser)
         print(f"Modem IMEI: {imei or 'unknown'}")

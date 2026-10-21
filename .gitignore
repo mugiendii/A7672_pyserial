@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+# local state of the scripts
+devices.csv
+devices.json
+mqtt_relay_log.jsonl
