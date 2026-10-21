@@ -92,9 +92,10 @@ def bring_up_network(ser):
     send_at(ser, "AT+CTZU=1")   # Take time from the network
     send_at(ser, "AT+CFUN=1")
 
+    # Data registration: LTE-only networks report CREG 0,6 (SMS only) while CEREG is 0,1
     for _ in range(10):
-        reg = send_at(ser, "AT+CREG?")
-        if "+CREG: 0,1" in reg or "+CREG: 0,5" in reg:
+        reg = send_at(ser, "AT+CEREG?") + send_at(ser, "AT+CGREG?") + send_at(ser, "AT+CREG?")
+        if re.search(r'\+C(E|G)?REG: \d,[15]\b', reg):
             break
         time.sleep(3)
     else:
@@ -164,8 +165,9 @@ def configure_ssl(ser):
     return True
 
 
-def connect_once(ser):
-    """One connect attempt. Returns the +CMQTTCONNECT error code (0 = accepted) or None."""
+def connect_once(ser, will=True):
+    """One connect attempt. Returns the +CMQTTCONNECT error code (0 = accepted) or None.
+    will=False for the first-boot provision login: the broker refuses a will it may not publish."""
     reset_mqtt(ser)
 
     resp = send_at(ser, "AT+CMQTTSTART", wait_time=2)
@@ -186,10 +188,11 @@ def connect_once(ser):
 
     # Last will: <id>/up/status = offline, QoS 1.
     # AT+CMQTTWILLMSG has no retain flag on this firmware, so the will is not retained.
-    if not send_with_prompt(ser, f'AT+CMQTTWILLTOPIC=0,{len(TOPIC_STATUS)}', TOPIC_STATUS):
-        return None
-    if not send_with_prompt(ser, f'AT+CMQTTWILLMSG=0,{len("offline")},1', "offline"):
-        return None
+    if will:
+        if not send_with_prompt(ser, f'AT+CMQTTWILLTOPIC=0,{len(TOPIC_STATUS)}', TOPIC_STATUS):
+            return None
+        if not send_with_prompt(ser, f'AT+CMQTTWILLMSG=0,{len("offline")},1', "offline"):
+            return None
 
     # Clean session = 1
     # Written directly so the password is not printed
@@ -210,18 +213,22 @@ def connect_once(ser):
     return int(m.group(1))
 
 
-def connect_with_backoff(ser):
+def connect_with_backoff(ser, will=True):
     delay = 1
     for attempt in range(1, CONNECT_ATTEMPTS + 1):
-        print(f"Connect attempt {attempt}/{CONNECT_ATTEMPTS} to {MQTT_BROKER_URI} as {DEVICE_ID}...")
-        err = connect_once(ser)
+        print(f"Connect attempt {attempt}/{CONNECT_ATTEMPTS} to {MQTT_BROKER_URI} as {DEVICE_ID} ({MQTT_CLIENT_ID})...")
+        err = connect_once(ser, will)
         if err == 0:
             print(f"MQTT connected over TLS to {MQTT_BROKER_URI}")
             return True
-        if err in (4, 5):
+        # A76xx codes (manual 18.3): 28 identifier rejected, 30 bad username/password, 31 not authorized
+        if err in (28, 30, 31):
             print(f"Connect refused ({err}): wrong username/password or not allowed. Not retrying.")
             return False
-        print(f"Connect failed (code {err}). A TLS error almost always means a wrong clock or missing CA.")
+        if err in (32, 33):
+            print(f"TLS failed ({err}): almost always a wrong clock or a missing CA certificate.")
+        else:
+            print(f"Connect failed (code {err}).")
         if attempt < CONNECT_ATTEMPTS:
             print(f"Backing off {delay}s")
             time.sleep(delay)
@@ -242,20 +249,32 @@ def subscribe(ser, topic):
     return False
 
 
+# Incoming-message URCs read while waiting for something else; listeners start from here
+rx_backlog = ""
+
+
+def take_rx_backlog():
+    global rx_backlog
+    out, rx_backlog = rx_backlog, ""
+    return out
+
+
 def publish(ser, topic, payload, qos=1, retained=0):
     """Publish one message. Returns True when the broker acknowledged it."""
+    global rx_backlog
     if not send_with_prompt(ser, f'AT+CMQTTTOPIC=0,{len(topic)}', topic):
         return False
     if not send_with_prompt(ser, f'AT+CMQTTPAYLOAD=0,{len(payload.encode())}', payload):
         return False
-    resp = send_at(ser, f'AT+CMQTTPUB=0,{qos},60,{retained}')
-    if "+CMQTTPUB: 0,0" not in resp:
-        urc = wait_for_urc(ser, "+CMQTTPUB:", timeout=15) or ""
-        resp += urc
+    # Not send_at: the response can carry incoming messages (e.g. a login) that must not be printed
+    ser.write(f'AT+CMQTTPUB=0,{qos},60,{retained}\r\n'.encode())
+    resp = wait_for_urc(ser, "+CMQTTPUB:", timeout=15) or ""
+    if "+CMQTTRX" in resp:
+        rx_backlog += resp[resp.index("+CMQTTRX"):] + "\r\n"
     if "+CMQTTPUB: 0,0" in resp:
         print(f"Published to {topic}: {payload}")
         return True
-    print(f"Publish to {topic} failed: {resp}")
+    print(f"Publish to {topic} failed: {re.findall(r'\+CMQTTPUB: 0,\d+|ERROR', resp) or 'timeout'}")
     return False
 
 
@@ -272,7 +291,7 @@ def parse_rx(block):
 def listen(ser, seconds):
     print(f"Listening on {TOPIC_DOWN} for {seconds}s (send one with an app login, e.g. relay-desktop)...")
     end = time.time() + seconds
-    buf = ""
+    buf = take_rx_backlog()
     received = 0
     while time.time() < end:
         if ser.in_waiting > 0:
@@ -305,7 +324,7 @@ def main():
     else:
         cfg = read_device_config(ser)
         if not cfg:
-            print(f"Modem has no {DEVICE_CONFIG_PATH}: run provision_device.py first, "
+            print(f"Modem has no {DEVICE_CONFIG_PATH}: run zero_touch_test.py first, "
                   f"or set MQTT_DEVICE_ID and MQTT_DEVICE_<ID>_PASSWORD.")
             ser.close()
             sys.exit(1)

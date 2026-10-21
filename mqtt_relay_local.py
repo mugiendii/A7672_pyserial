@@ -18,6 +18,7 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 
 import paho.mqtt.client as mqtt
@@ -35,6 +36,8 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mqtt_relay_
 REGISTRY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "devices.json")
 SILENT_AFTER = datetime.timedelta(minutes=15)   # No data for this long: shown as silent
 INSTALL_TIMEOUT = 600                           # Seconds --install waits for the first data
+# The web install page and the MQTT listener both update the registry
+registry_lock = threading.RLock()
 
 
 def load_registry():
@@ -52,33 +55,38 @@ def save_registry(registry):
     os.replace(tmp, REGISTRY_FILE)
 
 
-def register_device(device_id):
-    registry = load_registry()
-    now = datetime.datetime.now().isoformat(timespec="seconds")
-    entry = registry.setdefault(device_id, {"registered_at": now})
-    if entry.get("state") != "online":
-        entry["state"] = "pending"
-    save_registry(registry)
-    return entry
+def register_device(device_id, state="pending", **fields):
+    with registry_lock:
+        registry = load_registry()
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        entry = registry.setdefault(device_id, {"registered_at": now})
+        if entry.get("state") != "online":
+            entry["state"] = state
+        entry.update(fields)
+        save_registry(registry)
+        return entry
 
 
 def update_device_state(device, kind, payload, retained):
     """Mark a device online on live data, offline on its 'offline' status. Returns the new state."""
-    registry = load_registry()
-    entry = registry.get(device)
-    if entry is None:
-        return "unregistered"
-    if retained:
-        return entry["state"]   # Last known value from the broker, may be old: proves nothing
-    now = datetime.datetime.now().isoformat(timespec="seconds")
-    if kind in ("up/status", "status") and payload == "offline":
-        entry["state"] = "offline"
-    else:
-        entry["state"] = "online"
-        entry.setdefault("installed_at", now)
-        entry["last_seen"] = now
-    save_registry(registry)
-    return entry["state"]
+    with registry_lock:
+        registry = load_registry()
+        entry = registry.get(device)
+        if entry is None:
+            return "unregistered"
+        # Retained = last known value from the broker, may be old: proves nothing.
+        # Data while the login is still being written to the device can't be this device either.
+        if retained or entry["state"] in ("creating", "writing", "failed"):
+            return entry["state"]
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        if kind in ("up/status", "status") and payload == "offline":
+            entry["state"] = "offline"
+        else:
+            entry["state"] = "online"
+            entry.setdefault("installed_at", now)
+            entry["last_seen"] = now
+        save_registry(registry)
+        return entry["state"]
 
 
 def list_devices():
