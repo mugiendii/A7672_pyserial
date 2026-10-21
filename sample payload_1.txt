@@ -1,0 +1,119 @@
+{
+  "address": [
+    "68753600035015"
+  ],
+  "address.keyword": [
+    "68753600035015"
+  ],
+  "battery1Alarm": [
+    false
+  ],
+  "battery2Alarm": [
+    false
+  ],
+  "cardId": [
+    "5510000062"
+  ],
+  "cardId.keyword": [
+    "5510000062"
+  ],
+  "classEnabled": [
+    ""
+  ],
+  "classEnabled.keyword": [
+    ""
+  ],
+  "closeThreshold": [
+    0
+  ],
+  "controlCode": [
+    "81"
+  ],
+  "controlCode.keyword": [
+    "81"
+  ],
+  "dataId": [
+    "9023"
+  ],
+  "dataId.keyword": [
+    "9023"
+  ],
+  "deviceEUI": [
+    ""
+  ],
+  "deviceEUI.keyword": [
+    ""
+  ],
+  "deviceTime": [
+    "2026-04-21T09:45:27.556Z"
+  ],
+  "eeAlarm": [
+    false
+  ],
+  "emptyTubeAlarm": [
+    false
+  ],
+  "flowRate": [
+    0
+  ],
+  "gatewayId": [
+    ""
+  ],
+  "gatewayId.keyword": [
+    ""
+  ],
+  "id": [
+    "68aa8f64-5ed3-4224-83f4-a35c7bf1262d"
+  ],
+  "id.keyword": [
+    "68aa8f64-5ed3-4224-83f4-a35c7bf1262d"
+  ],
+  "lastPurchaseCredit": [
+    0
+  ],
+  "overRangeAlarm": [
+    false
+  ],
+  "pipeBurstAlarm": [
+    false
+  ],
+  "pipeLeakageAlarm": [
+    false
+  ],
+  "receivedAt": [
+    "2026-04-21T09:45:27.556Z"
+  ],
+  "rechargeBalance": [
+    426
+  ],
+  "rechargeTimes": [
+    0
+  ],
+  "reverseFlowAlarm": [
+    false
+  ],
+  "rssi": [
+    "30"
+  ],
+  "rssi.keyword": [
+    "30"
+  ],
+  "totalConsumption": [
+    9479
+  ],
+  "valveMode": [
+    0
+  ],
+  "valveStatus": [
+    1
+  ],
+  "waterTemperature": [
+    21.93
+  ],
+  "waterTemperatureAlarm": [
+    false
+  ],
+  "_id": "68aa8f64-5ed3-4224-83f4-a35c7bf1262d",
+  "_index": "device_uplinks",
+  "_score": null
+}
