@@ -145,12 +145,15 @@ def send_with_prompt(ser, command, data, result_timeout=5):
 def configure_ssl(ser):
     """TLS 1.2, verify the server against ISRG Root X1, SNI on."""
     print("Configuring SSL context...")
-    with open(CA_CERT_PATH, 'rb') as f:
-        ca = f.read()
-    if not send_with_prompt(ser, f'AT+CCERTDOWN="{CA_CERT_NAME}",{len(ca)}', ca, result_timeout=10):
-        print("CA cert upload failed")
-        return False
-    send_at(ser, "AT+CCERTLIST")
+    # CCERTDOWN gives no prompt (and no ERROR) when the file already exists: upload only if missing
+    if f'"{CA_CERT_NAME}"' in send_at(ser, "AT+CCERTLIST"):
+        print(f"{CA_CERT_NAME} already on the modem")
+    else:
+        with open(CA_CERT_PATH, 'rb') as f:
+            ca = f.read()
+        if not send_with_prompt(ser, f'AT+CCERTDOWN="{CA_CERT_NAME}",{len(ca)}', ca, result_timeout=10):
+            print("CA cert upload failed")
+            return False
 
     for cmd in (
         f'AT+CSSLCFG="sslversion",{SSL_CTX},3',          # TLS 1.2
